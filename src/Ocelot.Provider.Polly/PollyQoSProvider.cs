@@ -1,6 +1,7 @@
 namespace Ocelot.Provider.Polly
 {
     using System;
+    using System.Net;
     using System.Net.Http;
     using global::Polly;
     using global::Polly.CircuitBreaker;
@@ -10,29 +11,34 @@ namespace Ocelot.Provider.Polly
 
     public class PollyQoSProvider
     {
-        private readonly CircuitBreakerPolicy _circuitBreakerPolicy;
-        private readonly TimeoutPolicy _timeoutPolicy;
         private readonly IOcelotLogger _logger;
+        private readonly IAsyncPolicy<HttpResponseMessage>[] _policies;
 
         public PollyQoSProvider(DownstreamReRoute reRoute, IOcelotLoggerFactory loggerFactory)
         {
             _logger = loggerFactory.CreateLogger<PollyQoSProvider>();
 
             Enum.TryParse(reRoute.QosOptions.TimeoutStrategy, out TimeoutStrategy strategy);
+            var timeoutPolicy = Policy.TimeoutAsync<HttpResponseMessage>(TimeSpan.FromMilliseconds(reRoute.QosOptions.TimeoutValue), strategy);
 
-            _timeoutPolicy = Policy.TimeoutAsync(TimeSpan.FromMilliseconds(reRoute.QosOptions.TimeoutValue), strategy);
-
-            _circuitBreakerPolicy = Policy
+            var circuitBreakerPolicy = Policy
                 .Handle<HttpRequestException>()
                 .Or<TimeoutRejectedException>()
                 .Or<TimeoutException>()
-                .CircuitBreakerAsync(
-                    exceptionsAllowedBeforeBreaking: reRoute.QosOptions.ExceptionsAllowedBeforeBreaking,
-                    durationOfBreak: TimeSpan.FromMilliseconds(reRoute.QosOptions.DurationOfBreak),
+                .OrResult<HttpResponseMessage>(response =>
+                {
+                    if (response.StatusCode == HttpStatusCode.ServiceUnavailable)
+                    {
+                        return true;
+                    }
+                    return false;
+                })
+                .CircuitBreakerAsync(reRoute.QosOptions.ExceptionsAllowedBeforeBreaking,
+                    TimeSpan.FromMilliseconds(reRoute.QosOptions.DurationOfBreak),
                     onBreak: (ex, breakDelay) =>
                     {
                         _logger.LogError(
-                            ".Breaker logging: Breaking the circuit for " + breakDelay.TotalMilliseconds + "ms!", ex);
+                            ".Breaker logging: Breaking the circuit for " + breakDelay.TotalMilliseconds + "ms!", ex.Exception);
                     },
                     onReset: () =>
                     {
@@ -44,9 +50,10 @@ namespace Ocelot.Provider.Polly
                     }
                 );
 
-            CircuitBreaker = new CircuitBreaker(_circuitBreakerPolicy, _timeoutPolicy);
+            _policies=new IAsyncPolicy<HttpResponseMessage>[]{circuitBreakerPolicy,timeoutPolicy};
+
         }
 
-        public CircuitBreaker CircuitBreaker { get; }
+        public IAsyncPolicy<HttpResponseMessage>[] Policies => _policies;
     }
 }
