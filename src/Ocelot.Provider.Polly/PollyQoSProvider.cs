@@ -27,7 +27,7 @@ namespace Ocelot.Provider.Polly
                 .Or<TimeoutException>()
                 .OrResult<HttpResponseMessage>(response =>
                 {
-                    if (response.StatusCode == HttpStatusCode.ServiceUnavailable)
+                    if ((int)response.StatusCode >=500)
                     {
                         return true;
                     }
